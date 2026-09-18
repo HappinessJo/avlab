@@ -1,0 +1,8 @@
+build/
+.vs/
+x64/
+*.user
+media/*.mp4
+*.ppm
+*.pcm
+*.wav
