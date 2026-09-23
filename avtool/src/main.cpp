@@ -1,4 +1,5 @@
 #include <cstdio>
+#include<chrono>
 #include <string>
 extern "C" {
 #include<libavformat/avformat.h>
@@ -10,6 +11,7 @@ extern "C" {
 static int cmdInfo(const std::string& path);
 static int cmdPackets(const std::string& path);
 static int cmdFrame(const std::string& path);
+static int cmdDecode(const std::string& path);
 static void writePPM(const char* path, const uint8_t* data, int linesize, int w, int h);
 int main(int argc, char** argv) {
 	if (argc < 3) {
@@ -21,6 +23,7 @@ int main(int argc, char** argv) {
 	if (cmd == "info") return cmdInfo(path);
 	if (cmd == "packets") return cmdPackets(path);
 	if (cmd == "frame") return cmdFrame(path);
+	if (cmd == "decode") return cmdDecode(path);
 	printf("未知命令: %s\n", cmd.c_str());
 	return 1;
 	
@@ -137,6 +140,62 @@ static int cmdFrame(const std::string& path) {
 	if (!gotFrame) { printf("没解出帧\n");return -1; }
 	printf("第一帧: %dx%d 像素格式=%d\n", frame->width, frame->height, frame->format);
 }
+
+
+static int cmdDecode(const std::string& path) {
+	AVFormatContext* fmt = nullptr;
+	int ret = avformat_open_input(&fmt, path.c_str(), nullptr, nullptr);
+	if (ret < 0) {
+		char errbuf[AV_ERROR_MAX_STRING_SIZE] = { 0 };
+		av_strerror(ret, errbuf, sizeof(errbuf));
+		printf("文件打开失败: %s\n", errbuf);
+		return ret;
+	}
+		int vIdx = av_find_best_stream(fmt, AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
+		if (vIdx < 0) { printf("没找到视频流\n"); return -1; }
+		const AVCodec* decoder = avcodec_find_decoder(fmt->streams[vIdx]->codecpar->codec_id);
+		if (!decoder) { printf("没有找到对应解码器\n"); return -1; }
+		AVCodecContext* cctx = avcodec_alloc_context3(decoder);
+		
+		
+		avcodec_parameters_to_context(cctx, fmt->streams[vIdx]->codecpar);
+		ret = avcodec_open2(cctx, decoder, nullptr);
+		if (ret < 0) {
+			char errbuf[AV_ERROR_MAX_STRING_SIZE] = { 0 };
+			av_strerror(ret, errbuf, sizeof(errbuf));
+			printf("avcodec_open2 失败: %s\n", errbuf);
+			return ret;
+		}
+		int64_t count = 0;
+		auto t0 = std::chrono::steady_clock::now();
+		AVPacket* pkt = av_packet_alloc();
+		AVFrame* frame = av_frame_alloc();
+		for (;;) {
+			int r = av_read_frame(fmt, pkt);
+			if (r < 0) break;
+			if (pkt->stream_index != vIdx) { av_packet_unref(pkt);continue; }
+			avcodec_send_packet(cctx, pkt);
+			av_packet_unref(pkt);
+			while (avcodec_receive_frame(cctx, frame) == 0) {
+				if (count < 20) {
+					printf("#%-3lld pts=%-8lld type=%c\n", (long long)count, (long long)frame->pts, av_get_picture_type_char(frame->pict_type));
+				}
+				++count;
+			}
+		}
+		avcodec_send_packet(cctx, nullptr);
+		while (avcodec_receive_frame(cctx, frame) == 0) ++count;
+		auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
+		printf("----结果----\n");
+		printf("总帧数=%lld 耗时=%lld ms 解码速率=%.1f fps\n", (long long)count, (long long)ms, count * 1000.0 / (double)ms);
+		av_packet_free(&pkt);
+		av_frame_free(&frame);
+		avcodec_free_context(&cctx);
+		avformat_close_input(&fmt);
+		return 0;
+
+}
+
 static void writePPM(const char* path, const uint8_t* data, int linesize, int w, int h) {
 	FILE* f = fopen(path, "wb");
 	if (!f) { printf("写文件失败\n");return; }
